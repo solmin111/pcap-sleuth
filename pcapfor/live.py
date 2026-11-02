@@ -126,6 +126,7 @@ class LiveEngine:
         self.data.http_transactions = []
         self.data.ftp_streams = []
         self.data.smtp_streams = []
+        self.data.telnet_streams = []
         for s in self.table.sessions:
             if s.proto != "tcp":
                 continue
@@ -134,7 +135,9 @@ class LiveEngine:
             if not c2s and not s2c:
                 continue
             banner = s2c[:200].upper()
-            if s.sport in (25, 587) or (s2c.startswith(b"220") and b"SMTP" in banner):
+            if s.sport == 23:
+                self.data.telnet_streams.append((s, c2s, s2c))
+            elif s.sport in (25, 587) or (s2c.startswith(b"220") and b"SMTP" in banner):
                 self.data.smtp_streams.append((s, c2s, s2c))
             elif s.sport == 21 or (s2c.startswith(b"220 ") and b"FTP" in banner):
                 self.data.ftp_streams.append((s, c2s, s2c))

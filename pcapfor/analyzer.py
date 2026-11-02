@@ -25,6 +25,7 @@ class AnalysisData:
     http_transactions: list = field(default_factory=list)  # [(Session, HttpTransaction)]
     ftp_streams: list = field(default_factory=list)        # [(Session, c2s, s2c)]
     smtp_streams: list = field(default_factory=list)       # [(Session, c2s, s2c)]
+    telnet_streams: list = field(default_factory=list)     # [(Session, c2s, s2c)]
     dns_messages: list = field(default_factory=list)       # [(질의 호스트 IP, DnsMessage, ts)]
     arp_records: list = field(default_factory=list)        # [(ts, Arp)]
 
@@ -117,7 +118,9 @@ def analyze(path: str, ioc_path: str | None = None) -> AnalysisResult:
             continue
         banner = s2c[:200].upper()
         # SMTP 를 먼저 판별한다 (ESMTP 배너에 "FTP"가 부분 문자열로 들어가므로)
-        if s.sport in (25, 587) or (s2c.startswith(b"220") and b"SMTP" in banner):
+        if s.sport == 23:
+            data.telnet_streams.append((s, c2s, s2c))
+        elif s.sport in (25, 587) or (s2c.startswith(b"220") and b"SMTP" in banner):
             data.smtp_streams.append((s, c2s, s2c))
         elif s.sport == 21 or (s2c.startswith(b"220 ") and b"FTP" in banner):
             data.ftp_streams.append((s, c2s, s2c))

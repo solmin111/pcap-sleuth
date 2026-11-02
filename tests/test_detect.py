@@ -63,6 +63,82 @@ class TestDetectors(unittest.TestCase):
         # 정상 도메인(naver 등)은 탐지에 등장하면 안 된다
         self.assertFalse(any("naver" in t for t in _titles(r)))
 
+    # ---- QA 2차(Practical Packet Analysis 샘플)에서 추가된 규칙들 ----
+
+    def _analyze_pkts(self, pkts):
+        f = tempfile.NamedTemporaryFile(delete=False, suffix=".pcap")
+        f.close()
+        write_pcap(f.name, pkts)
+        try:
+            return analyze(f.name)
+        finally:
+            os.unlink(f.name)
+
+    def test_sqli_tautology_variants(self):
+        from pcapfor.detect import WEB_ATTACK_RULES
+        sqli = WEB_ATTACK_RULES[0][3]
+        for s in ("%' or '0'='0", "x' or 'a'='a", "' or 1=1", "' OR '1'='1"):
+            self.assertIsNotNone(sqli.search(s), s)
+        self.assertIsNone(sqli.search("' or '0'='1"))   # 다른 값 비교는 항진식 아님
+
+    def test_telnet_cleartext_credentials(self):
+        from pcapfor import craft
+        pkts = []
+        flow = craft.TcpFlow(pkts, "192.168.0.2", 1550, "192.168.0.1", 23)
+        flow.handshake(1.0)
+        flow.send(1.01, b"\xff\xfd\x18\xff\xfb\x01\r\nlogin: ", c2s=False)
+        for i, ch in enumerate(b"fakx\x7fe\r\n"):       # 오타 후 백스페이스 수정
+            flow.send(1.02 + i * 0.01, bytes([ch]))
+        flow.send(1.2, b"Password:", c2s=False)
+        flow.send(1.3, b"user\r\nls -a\r\n")
+        flow.send(1.4, b"Last login: ...\r\n$ ", c2s=False)
+        flow.close(1.5)
+        r = self._analyze_pkts(pkts)
+        creds = [x for x in r.findings if "Telnet" in x.title]
+        self.assertEqual(len(creds), 1)
+        ev = " ".join(creds[0].evidence)
+        self.assertIn("사용자명: fake", ev)
+        self.assertIn("ls -a", ev)
+        self.assertNotIn("user", ev.replace("사용자명", ""))  # 비밀번호 원문 비노출
+
+    def test_arp_one_mac_many_ips(self):
+        from pcapfor import craft
+        atk = "00:25:b3:bf:91:ee"
+        pkts = [(1.0, craft.arp_reply(atk, "172.16.0.1", "00:21:70:c0:56:f0", "172.16.0.107")),
+                (2.0, craft.arp_reply(atk, "172.16.0.105", "00:21:70:c0:56:f0", "172.16.0.107"))]
+        r = self._analyze_pkts(pkts)
+        self.assertTrue(any(atk in x.title for x in r.findings if x.category == "spoofing"))
+
+    def test_http_post_hex_c2(self):
+        from pcapfor import craft
+        pkts = []
+        for i in range(3):
+            flow = craft.TcpFlow(pkts, "192.168.122.145", 49200 + i, "203.0.113.44", 80)
+            ts = 10.0 + i * 30
+            flow.handshake(ts)
+            body = b"o=" + (b"6b7876386833" * 12)
+            flow.send(ts + 0.01, b"POST /76N1Lm.php?n=r" + str(i).encode() +
+                      b" HTTP/1.1\r\nHost: c2.example\r\nContent-Length: " +
+                      str(len(body)).encode() + b"\r\n\r\n" + body)
+            flow.send(ts + 0.02, b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok", c2s=False)
+            flow.close(ts + 0.03)
+        r = self._analyze_pkts(pkts)
+        self.assertTrue(any("HTTP POST C2" in x.title for x in r.findings))
+
+    def test_rat_screen_capture_exfil(self):
+        from pcapfor import craft
+        pkts = []
+        jpeg = b"\xff\xd8\xff\xe0\x00\x10JFIF" + bytes(range(256)) * 8
+        for i in range(3):
+            flow = craft.TcpFlow(pkts, "172.16.0.114", 6640 + i, "172.16.0.111", 4433)
+            ts = 5.0 + i * 47.0
+            flow.handshake(ts)
+            flow.send(ts + 0.01, b"CAPSCREEN|C:\\x.dat|2058\n" + jpeg)
+            flow.send(ts + 0.02, b"OK\r\n", c2s=False)
+            flow.close(ts + 0.03)
+        r = self._analyze_pkts(pkts)
+        self.assertTrue(any("RAT" in x.title for x in r.findings))
+
     def test_smtp_cleartext_credentials(self):
         # Agent Tesla 류: SMTP AUTH LOGIN(base64) + 메일 유출 (QA 이미지 03 패턴)
         import base64 as b64

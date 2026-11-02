@@ -157,6 +157,19 @@ class TestHttp(unittest.TestCase):
         self.assertEqual(txs[0].request.body, b"pw=1234")
 
 
+class TestSessionDirection(unittest.TestCase):
+    def test_midstream_capture_uses_well_known_port_as_server(self):
+        # 캡처가 연결 도중 시작돼 첫 패킷이 서버(21)발 데이터인 경우
+        ip = craft.ipv4("10.121.70.151", "10.234.125.254", 6,
+                        craft.tcp(21, 2217, 100, 200, craft.TCP_PSH | craft.TCP_ACK,
+                                  b"530 Login incorrect.\r\n"))
+        table = SessionTable()
+        table.feed(decode(RawPacket(1.0, ip, len(ip), 101, 1)))
+        s = table.sessions[0]
+        self.assertEqual((s.server, s.sport), ("10.121.70.151", 21))
+        self.assertIn(b"530", s.stream(c2s=False))
+
+
 class TestReassembly(unittest.TestCase):
     def _packets_out_of_order(self):
         pkts = []

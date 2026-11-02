@@ -53,6 +53,22 @@ def _b64(raw: bytes) -> bytes:
     return base64.b64decode(raw + b"=" * (-len(raw) % 4))
 
 
+def _strip_telnet(raw: bytes) -> bytes:
+    """Telnet IAC 협상 시퀀스와 NUL 을 제거하고 백스페이스를 적용한 텍스트."""
+    b = re.sub(rb"\xff\xfa.*?\xff\xf0", b"", raw, flags=re.S)   # 부협상 SB ... SE
+    b = re.sub(rb"\xff[\xfb-\xfe].", b"", b, flags=re.S)        # WILL/WONT/DO/DONT <옵션>
+    b = re.sub(rb"\xff[\xf0-\xfa]", b"", b)                     # 그 외 2바이트 명령
+    b = b.replace(b"\xff\xff", b"\xff").replace(b"\x00", b"")
+    out = bytearray()
+    for ch in b:
+        if ch in (0x08, 0x7F):          # 백스페이스: 직전 글자 지움
+            if out and out[-1] not in (0x0A, 0x0D):
+                out.pop()
+        else:
+            out.append(ch)
+    return bytes(out)
+
+
 def shannon_entropy(s: str) -> float:
     if not s:
         return 0.0
@@ -67,6 +83,7 @@ def run_all(data, ioc_path: str | None = None) -> list[Finding]:
         detect_port_scan, detect_host_scan, detect_bruteforce,
         detect_cleartext_credentials, detect_web_attacks,
         detect_dns_tunneling, detect_beaconing, detect_arp_spoofing,
+        detect_http_post_c2, detect_rat_screen_exfil,
     ):
         findings.extend(det(data))
     if ioc_path:
@@ -268,6 +285,35 @@ def detect_cleartext_credentials(data) -> list[Finding]:
             recommendation="해당 계정 비밀번호 즉시 변경, 수신자 주소 차단, 발신 호스트 격리·점검",
             session_ids=[sess.sid], ts=sess.first_ts,
         ))
+    # Telnet: 협상 바이트(IAC)를 걷어내면 클라이언트가 친 계정·명령이 그대로 나온다
+    for sess, c2s, s2c in getattr(data, "telnet_streams", []):
+        srv = _strip_telnet(s2c).lower()
+        if not (b"login:" in srv or b"username:" in srv) or b"password" not in srv:
+            continue
+        typed = _strip_telnet(c2s)
+        lines = [ln.strip() for ln in re.split(rb"\r\n|\r|\n", typed) if ln.strip()]
+        if not lines:
+            continue
+        user = lines[0].decode("latin-1", "replace")[:40]
+        pw = lines[1] if len(lines) > 1 else b""
+        cmds = [ln.decode("latin-1", "replace")[:40] for ln in lines[2:7]]
+        failed = b"incorrect" in srv or b"failed" in srv
+        ev = [f"사용자명: {user}"]
+        if pw:
+            ev.append(f"비밀번호: {'*' * min(len(pw), 12)} (캡처에 평문 존재)")
+        ev.append("로그인 결과: " + ("실패 응답 관찰" if failed else "성공으로 보임 (실패 응답 없음)"))
+        if cmds:
+            ev.append("로그인 후 실행 명령: " + ", ".join(cmds))
+        out.append(Finding(
+            "high", "credential",
+            f"Telnet 평문 자격증명 노출: {sess.key_str}",
+            "Telnet 은 로그인 정보와 입력 명령을 암호화 없이 전송합니다. "
+            "같은 구간을 캡처한 누구나 계정과 작업 내용을 그대로 볼 수 있습니다.",
+            evidence=ev,
+            mitre="T1040 (Network Sniffing), T1021 (Remote Services)",
+            recommendation="Telnet 비활성화 후 SSH 로 전환, 노출된 계정 비밀번호 즉시 변경",
+            session_ids=[sess.sid], ts=sess.first_ts,
+        ))
     seen_form = set()
     for sess, tx in data.http_transactions:
         if not tx.request:
@@ -296,11 +342,16 @@ def detect_cleartext_credentials(data) -> list[Finding]:
                 if dedup in seen_form:
                     continue
                 seen_form.add(dedup)
+                ev = [f"필드명: {m.group(1)}"]
+                um = re.search(r"(?:^|&)(user(?:name)?|login|id|email|uid)=([^&\s]+)", body, re.I)
+                if um:
+                    ev.insert(0, f"사용자명: {um.group(2)[:40]}")
+                ev.append(f"비밀번호: {'*' * min(len(m.group(2)), 12)} (본문에 평문 존재)")
                 out.append(Finding(
                     "medium", "credential",
                     f"HTTP 폼 비밀번호 평문 전송: {sess.key_str}",
                     f"POST {tx.request.uri} 본문에 비밀번호 필드가 평문으로 포함되어 있습니다.",
-                    evidence=[f"필드명: {m.group(1)}"],
+                    evidence=ev,
                     mitre="T1040 (Network Sniffing)",
                     recommendation="HTTPS 적용",
                     session_ids=[sess.sid], ts=sess.first_ts,
@@ -313,7 +364,9 @@ def detect_cleartext_credentials(data) -> list[Finding]:
 WEB_ATTACK_RULES = [
     # (이름, 심각도, MITRE, 패턴)  -- URI와 본문 양쪽을 검사한다
     ("SQL 인젝션", "high", "T1190", re.compile(
-        r"(union(\s|\+|/\*.*?\*/)+select|'\s*or\s+'?1'?\s*=\s*'?1|sleep\(\d+\)|benchmark\(|information_schema)", re.I)),
+        # 항진식은 '1'='1 뿐 아니라 '0'='0, 'a'='a 처럼 같은 값을 비교하는 모든 형태
+        r"(union(\s|\+|/\*.*?\*/)+select|'\s*or\s+'?(?P<t>\w+)'?\s*=\s*'?(?P=t)"
+        r"|sleep\(\d+\)|benchmark\(|information_schema)", re.I)),
     ("XSS(크로스사이트 스크립팅)", "medium", "T1189", re.compile(
         r"(<script[\s>]|javascript:|onerror\s*=|onload\s*=|document\.cookie)", re.I)),
     ("경로 조작/LFI", "high", "T1190", re.compile(
@@ -496,6 +549,100 @@ def detect_beaconing(data) -> list[Finding]:
     return out
 
 
+_HEX_POST = re.compile(rb"[A-Za-z]{1,3}=[0-9a-fA-F]{64,}")
+
+
+def detect_http_post_c2(data) -> list[Finding]:
+    """암호문을 16진수로 담은 단일 파라미터 POST 가 같은 경로로 반복되는 C2 패턴.
+
+    정상 폼은 여러 필드를 사람이 읽을 수 있는 값으로 보낸다. 반면 랜섬웨어 계열
+    C2 체크인은 암호화한 바이트를 hex 로 바꿔 `x=6b78…` 한 필드에 담아 같은 스크립트로
+    반복 전송하는 경우가 많다 (QA 이미지 12 CryptoWall 4에서 실측).
+    """
+    out = []
+    groups = defaultdict(list)  # (server, host, path) -> [(sess, tx)]
+    for sess, tx in data.http_transactions:
+        q = tx.request
+        if not q or q.method != "POST" or not q.body:
+            continue
+        if _HEX_POST.fullmatch(q.body.strip()):
+            groups[(sess.server, q.host, q.uri.split("?")[0])].append((sess, tx))
+    for (server, host, path), items in groups.items():
+        if len(items) < 2:
+            continue
+        clients = sorted({s.client for s, _ in items})
+        first = items[0][1].request
+        statuses = [str(t.response.status) if t.response else "-" for _, t in items]
+        out.append(Finding(
+            "high", "c2",
+            f"HTTP POST C2 의심: {', '.join(clients)} -> {host or server}{path}",
+            f"같은 스크립트로 암호화된 16진수 페이로드를 담은 POST 가 {len(items)}회 반복되었습니다. "
+            f"감염 PC 가 C2 서버에 체크인하는 랜섬웨어 계열의 전형적인 패턴입니다.",
+            evidence=[f"서버: {server} (Host: {host or '-'})",
+                      f"요청 예시: POST {first.uri[:70]}",
+                      f"본문 예시: {first.body[:44].decode('latin-1')}… ({len(first.body)}바이트)",
+                      f"응답 코드: {', '.join(statuses)}"],
+            mitre="T1071.001 (Web Protocols), T1132 (Data Encoding)",
+            recommendation=f"{host or server} 차단, 요청을 보낸 호스트 격리 후 랜섬웨어 감염 여부 점검",
+            session_ids=[s.sid for s, _ in items],
+            ts=min(s.first_ts for s, _ in items),
+        ))
+    return out
+
+
+_IMG_MAGIC = (b"\xff\xd8\xff", b"\x89PNG\r\n\x1a\n")
+_STD_TCP_PORTS = {20, 21, 25, 80, 110, 143, 443, 587, 993, 995, 8000, 8080, 8443}
+
+
+def _printable(b: bytes, n: int = 70) -> str:
+    return "".join(chr(c) if 32 <= c < 127 else "." for c in b[:n])
+
+
+def detect_rat_screen_exfil(data) -> list[Finding]:
+    """비표준 포트로 이미지(화면 캡처)를 반복 업로드하는 원격 제어 악성코드(RAT) 패턴.
+
+    RAT 는 사람이 조종하므로 접속 간격이 불규칙해 비커닝 규칙으로는 안 잡힌다.
+    대신 '평문 커스텀 프로토콜 + 이미지 업로드 + 서버 응답은 몇 바이트' 라는
+    행위 자체를 본다 (QA 이미지 13에서 실측).
+    """
+    out = []
+    uploads = defaultdict(list)  # (client, server, port) -> [(sess, header)]
+    for s in data.sessions:
+        if s.proto != "tcp" or s.sport in _STD_TCP_PORTS or s.bytes_c2s < 1024:
+            continue
+        head = s.stream(c2s=True)[:4096]
+        positions = [p for p in (head.find(m) for m in _IMG_MAGIC) if p >= 0]
+        if positions and min(positions) <= 512 and s.bytes_s2c < 200:
+            uploads[(s.client, s.server, s.sport)].append((s, head[:min(positions)]))
+    for (client, server, port), items in uploads.items():
+        if len(items) < 3:
+            continue
+        total = sum(s.bytes_c2s for s, _ in items)
+        ev = [f"이미지 업로드 세션 {len(items)}개, 총 {total:,}바이트 (서버 응답은 세션당 200바이트 미만)"]
+        header = items[0][1].strip()
+        if header:
+            ev.append(f"업로드 헤더: {_printable(header)}")
+        pair = [x for x in data.sessions
+                if (x.client, x.server, x.sport) == (client, server, port)]
+        ctrl = max(pair, key=lambda x: x.duration)
+        if ctrl.duration > 10:
+            ev.append(f"명령 채널: 세션 #{ctrl.sid} {ctrl.duration:.0f}초 지속")
+            ev.append(f"  감염 PC → 서버: {_printable(ctrl.stream(c2s=True))}")
+            ev.append(f"  서버 → 감염 PC: {_printable(ctrl.stream(c2s=False))}")
+        out.append(Finding(
+            "high", "c2",
+            f"원격 화면 캡처 유출 의심(RAT): {client} -> {server}:{port}",
+            f"비표준 포트 {port} 로 이미지 파일을 {len(items)}회 업로드하고 서버는 짧은 명령만 "
+            f"보냈습니다. 원격 제어 악성코드가 화면을 찍어 공격자에게 보내는 행위로 보입니다.",
+            evidence=ev,
+            mitre="T1113 (Screen Capture), T1041 (Exfiltration Over C2 Channel), T1219",
+            recommendation=f"{server}:{port} 통신 차단, {client} 즉시 격리 후 원격 제어 악성코드 점검",
+            session_ids=[s.sid for s, _ in items],
+            ts=min(s.first_ts for s, _ in items),
+        ))
+    return out
+
+
 # ---------------------------------------------------------------- 스푸핑
 
 def detect_arp_spoofing(data) -> list[Finding]:
@@ -521,6 +668,36 @@ def detect_arp_spoofing(data) -> list[Finding]:
                 recommendation="정적 ARP/DAI(Dynamic ARP Inspection) 적용, 해당 구간 트래픽 전수 조사",
                 ts=ip_first[ip],
             ))
+    # 반대 방향 규칙: MAC 하나가 IP 여러 개의 주인이라고 알린다.
+    # 진짜 게이트웨이 MAC 이 캡처에 없으면 위 규칙은 비교 대상이 없어 놓친다
+    # (QA 이미지 11에서 실측). ARP 요청의 sender 필드도 상대 캐시를 갱신하므로 함께 본다.
+    mac_ips = defaultdict(set)
+    mac_ops = Counter()
+    mac_first = defaultdict(lambda: float("inf"))
+    for ats, a in data.arp_records:
+        if a.sender_ip == "0.0.0.0" or a.sender_mac in ("00:00:00:00:00:00", "ff:ff:ff:ff:ff:ff"):
+            continue  # ARP 프로브는 주장이 아니다
+        mac_ips[a.sender_mac].add(a.sender_ip)
+        mac_ops[(a.sender_mac, a.sender_ip, a.op)] += 1
+        mac_first[a.sender_mac] = min(mac_first[a.sender_mac], ats)
+    for mac, ips in mac_ips.items():
+        if len(ips) < 2:
+            continue
+        detail = []
+        for ip in sorted(ips):
+            req, rep = mac_ops[(mac, ip, 1)], mac_ops[(mac, ip, 2)]
+            detail.append(f"{ip} (요청 {req}회 · 응답 {rep}회)")
+        out.append(Finding(
+            "high", "spoofing",
+            f"ARP 스푸핑 의심: MAC {mac} 가 IP {len(ips)}개를 주장",
+            "한 장비(MAC)가 서로 다른 IP 여러 개의 주인이라고 ARP 로 알렸습니다. "
+            "다른 호스트(특히 게이트웨이)의 IP를 사칭해 트래픽을 가로채는 캐시 포이즈닝 패턴입니다.",
+            evidence=[f"{mac} 가 주장한 IP: " + ", ".join(detail)],
+            mitre="T1557.002 (ARP Cache Poisoning)",
+            recommendation="스위치 MAC 테이블·DHCP 기록으로 정상 소유자 확인, 정적 ARP/DAI 적용, "
+                           "해당 MAC 장비 격리",
+            ts=mac_first[mac],
+        ))
     return out
 
 

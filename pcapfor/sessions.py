@@ -90,11 +90,17 @@ class SessionTable:
         s = self._map.get(key)
         if s is None:
             # 새 세션: 이 패킷의 송신자를 클라이언트로 가정 (SYN이면 확실)
+            client, cport, server, sport = p.src, p.sport, p.dst, p.dport
+            fresh_syn = p.proto == "tcp" and p.flag(TCP_SYN) and not p.flag(TCP_ACK)
+            # 캡처가 연결 도중에 시작되면 첫 패킷이 서버발일 수 있다.
+            # SYN 이 아니고 출발 포트만 잘 알려진 포트면 그쪽을 서버로 본다.
+            if not fresh_syn and p.sport < 1024 <= p.dport:
+                client, cport, server, sport = p.dst, p.dport, p.src, p.sport
             s = Session(
                 sid=len(self.sessions) + 1,
                 proto=p.proto,
-                client=p.src, cport=p.sport,
-                server=p.dst, sport=p.dport,
+                client=client, cport=cport,
+                server=server, sport=sport,
                 first_ts=p.ts, last_ts=p.ts,
             )
             self._map[key] = s
