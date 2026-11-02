@@ -98,21 +98,31 @@ def detect_port_scan(data) -> list[Finding]:
     out = []
     # src -> dst -> {미완성 연결의 dst 포트}
     probes = defaultdict(lambda: defaultdict(set))
+    opened = defaultdict(lambda: defaultdict(set))  # 스캔에 SYN/ACK 로 응답한 포트
     first_ts = defaultdict(lambda: defaultdict(lambda: float("inf")))
     for s in data.sessions:
-        if s.proto == "tcp" and s.syn_seen and not s.synack_seen and s.bytes_s2c == 0:
+        if s.proto != "tcp" or not s.syn_seen:
+            continue
+        if not s.synack_seen and s.bytes_s2c == 0:
             probes[s.client][s.server].add(s.sport)
             first_ts[s.client][s.server] = min(first_ts[s.client][s.server], s.first_ts)
+        elif s.synack_seen and s.bytes_c2s == 0:
+            opened[s.client][s.server].add(s.sport)
     for src, by_dst in probes.items():
         for dst, ports in by_dst.items():
             if len(ports) >= THRESHOLDS["portscan_min_ports"]:
                 sample = sorted(ports)[:12]
+                ev = [f"대상 포트 예시: {', '.join(map(str, sample))} ..."]
+                found = sorted(opened[src][dst])
+                if found:
+                    ev.append(f"응답한 열린 포트(공격자가 발견한 서비스): "
+                              f"{', '.join(map(str, found[:15]))}")
                 out.append(Finding(
                     "high", "recon",
                     f"포트 스캔 의심: {src} -> {dst}",
-                    f"{src} 가 {dst} 의 서로 다른 포트 {len(ports)}개에 SYN을 보냈지만 "
-                    f"응답 데이터가 없는 미완성 연결입니다.",
-                    evidence=[f"대상 포트 예시: {', '.join(map(str, sample))} ..."],
+                    f"{src} 가 {dst} 의 서로 다른 포트 {len(ports) + len(found)}개에 SYN을 보냈고, "
+                    f"그중 {len(ports)}개는 응답이 없는 미완성 연결입니다.",
+                    evidence=ev,
                     mitre="T1046 (Network Service Discovery)",
                     recommendation="해당 출발지 IP 차단 여부 검토, 스캔 이후 성공한 연결이 있는지 추적",
                     ts=first_ts[src][dst],
