@@ -16,7 +16,7 @@ pre{{color:#d8e6f5;padding:12px 18px;margin:0;line-height:1.5;white-space:pre-wr
 .cmd{{color:#63d0a4}}
 .sev-c{{color:#ff8a86;font-weight:bold}} .sev-h{{color:#ffb27d;font-weight:bold}} .sev-m{{color:#ffe082;font-weight:bold}}
 </style></head><body>
-<div class="bar"><span class="dot" style="background:#e05252"></span><span class="dot" style="background:#e8b33a"></span><span class="dot" style="background:#63d0a4"></span>pcap for &mdash; CLI</div>
+<div class="bar"><span class="dot" style="background:#e05252"></span><span class="dot" style="background:#e8b33a"></span><span class="dot" style="background:#63d0a4"></span>pcap for · CLI</div>
 <pre><span class="cmd">PS C:\\pcap-for&gt; {cmd}</span>
 {body}</pre></body></html>"""
 

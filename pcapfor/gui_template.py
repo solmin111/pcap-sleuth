@@ -199,7 +199,7 @@ table.list tr.fl td{background:#241a1a}
   </section>
 
   <section id="tab-timeline" class="tab hidden">
-    <div class="panel"><div class="ptitle">Attack chronology — 탐지기 레인별 발생 시각 (점 클릭 = 상세, 숫자 배지 = 겹친 탐지 수)</div>
+    <div class="panel"><div class="ptitle">Attack chronology: 탐지기 레인별 발생 시각 (점 클릭 = 상세, 숫자 배지 = 겹친 탐지 수)</div>
       <div class="tl-ctrl">
         <span class="muted">구간 확대</span>
         <input type="range" id="tl-a" min="0" max="95" value="0">
@@ -318,7 +318,7 @@ function renderFeed(){
     '<div class="ev">'+f.evidence.map(e=>'<div>· '+esc(e)+'</div>').join('')+
     (f.mitre && f.mitre!=='-' ? '<div style="color:#b39ddb">MITRE: '+esc(f.mitre)+'</div>':'')+
     (f.reco ? '<div style="color:#90caf9">대응: '+esc(f.reco)+'</div>':'')+'</div></div>'
-  ).join('') || '<div class="muted">탐지 없음 — 이상 징후가 발견되지 않았습니다.</div>';
+  ).join('') || '<div class="muted">탐지 없음: 이상 징후가 발견되지 않았습니다.</div>';
   document.querySelectorAll('.fitem').forEach(el => el.onclick = () => el.classList.toggle('open'));
 }
 function renderDetTab(){
@@ -540,7 +540,7 @@ function renderEvidence(){
   if (!st) return;
   const rel = S.findings.filter(f=>f.sids.includes(st.sid));
   $('ev-view').innerHTML =
-    '<div class="ptitle">세션 #'+st.sid+' — '+esc(st.client)+' ⇄ '+esc(st.server)+'</div>'+
+    '<div class="ptitle">세션 #'+st.sid+': '+esc(st.client)+' ⇄ '+esc(st.server)+'</div>'+
     rel.map(f=>'<span class="badge b-'+f.sev+'">'+SEVK[f.sev].toUpperCase()+'</span> <b style="font-size:12px">'+esc(f.title)+'</b><br>').join('')+
     '<div class="dirlab">클라이언트 → 서버'+(st.c2s_more?' (앞 4KB)':'')+'</div>'+
     '<div class="stream c2s">'+(st.c2s?hilite(st.c2s):'(데이터 없음)')+'</div>'+
